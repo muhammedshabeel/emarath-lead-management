@@ -1,0 +1,480 @@
+// Emarath CRM - Production Prisma Schema
+// PostgreSQL + Full Audit Trail + WhatsApp Native
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum StaffRole {
+  ADMIN
+  AGENT
+  CS
+  DELIVERY
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  FOLLOW_UP
+  WON
+  LOST
+}
+
+enum OrderStatus {
+  ONGOING
+  DELIVERED
+  CANCELLED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  INITIATED
+  RINGING
+  ANSWERED
+  ENDED
+  FAILED
+}
+
+// ============================================
+// STAFF / USERS
+// ============================================
+
+model Staff {
+  id            String    @id @default(cuid())
+  clerkUserId   String?   @unique @map("clerk_user_id")
+  name          String
+  email         String    @unique
+  role          StaffRole @default(AGENT)
+  country       String?
+  active        Boolean   @default(true)
+  cx3Extension  String?   @map("3cx_extension")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  assignedLeads            Lead[]                  @relation("AssignedAgent")
+  salesOrders              Order[]                 @relation("SalesStaff")
+  deliveryOrders           Order[]                 @relation("DeliveryStaff")
+  complaints               Complaint[]
+  deliveryFollowupsSales   DeliveryFollowup[]      @relation("FollowupSalesStaff")
+  deliveryFollowupsDelivery DeliveryFollowup[]     @relation("FollowupDeliveryStaff")
+  conversations            WhatsappConversation[]
+  calls                    Call[]
+  auditLogs                AuditLog[]
+
+  @@index([role, active])
+  @@index([country])
+  @@map("staff")
+}
+
+// ============================================
+// PRODUCTS
+// ============================================
+
+model Product {
+  productCode  String   @id @map("product_code")
+  productName  String   @map("product_name")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  leadProducts  LeadProduct[]
+  orderItems    OrderItem[]
+
+  @@map("products")
+}
+
+// ============================================
+// CUSTOMERS
+// ============================================
+
+model Customer {
+  id           String   @id @default(cuid())
+  name         String?
+  phoneKey     String?  @unique @map("phone_key") // E.164 normalized
+  phone1       String?  @map("phone_1")
+  phone2       String?  @map("phone_2")
+  country      String?
+  city         String?
+  addressLine1 String?  @map("address_line_1")
+  addressLine2 String?  @map("address_line_2")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  leads         Lead[]
+  orders        Order[]
+  conversations WhatsappConversation[]
+
+  @@index([phoneKey])
+  @@map("customers")
+}
+
+// ============================================
+// LEADS (Core)
+// ============================================
+
+model Lead {
+  id              String      @id @default(cuid())
+  leadNumber      Int         @unique @default(autoincrement()) @map("lead_number")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  leadDate        DateTime    @default(now()) @map("lead_date")
+  country         String?
+  source          String?
+  adSource        String?     @map("ad_source")
+  language        String?
+  
+  // Phone tracking
+  phoneKey        String?     @map("phone_key") // E.164 normalized
+  
+  // Customer link
+  customerId      String?     @map("customer_id")
+  customer        Customer?   @relation(fields: [customerId], references: [id])
+  
+  // Assignment
+  assignedAgentId String?     @map("assigned_agent_id")
+  assignedAgent   Staff?      @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
+  
+  // Status tracking
+  status          LeadStatus  @default(NEW)
+  reason          String?     // General reason/notes
+  lostReason      String?     @map("lost_reason")
+  notes           String?     @db.Text
+  
+  // Flags
+  dispatchFlag    Boolean     @default(false) @map("dispatch_flag")
+  paymentMethod   String?     @map("payment_method")
+  csRemarks       String?     @db.Text @map("cs_remarks")
+  
+  // Relations
+  intakeForm      LeadIntakeForm?
+  leadProducts    LeadProduct[]
+  orders          Order[]
+  conversations   WhatsappConversation[]
+  calls           Call[]
+
+  @@index([phoneKey])
+  @@index([status])
+  @@index([assignedAgentId])
+  @@index([createdAt])
+  @@index([country])
+  @@map("leads")
+}
+
+// ============================================
+// LEAD INTAKE FORM (Structured conversion data)
+// ============================================
+
+model LeadIntakeForm {
+  leadId               String   @id @map("lead_id")
+  lead                 Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  
+  customerName         String?  @map("customer_name")
+  altPhone             String?  @map("alt_phone")
+  
+  // Shipping details
+  shippingCountry      String?  @map("shipping_country")
+  shippingCity         String?  @map("shipping_city")
+  shippingAddressLine1 String?  @map("shipping_address_line_1")
+  shippingAddressLine2 String?  @map("shipping_address_line_2")
+  googleMapsLink       String?  @map("google_maps_link")
+  
+  // Delivery preferences
+  preferredDeliveryTime String? @map("preferred_delivery_time")
+  specialInstructions   String? @db.Text @map("special_instructions")
+  
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@map("lead_intake_forms")
+}
+
+// ============================================
+// LEAD PRODUCTS (1:N - items before conversion)
+// ============================================
+
+model LeadProduct {
+  id            String   @id @default(cuid())
+  leadId        String   @map("lead_id")
+  lead          Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  productCode   String   @map("product_code")
+  product       Product  @relation(fields: [productCode], references: [productCode])
+  quantity      Int      @default(1)
+  priceEstimate Decimal? @map("price_estimate") @db.Decimal(10, 2)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([leadId, productCode])
+  @@map("lead_products")
+}
+
+// ============================================
+// ORDERS (Post-conversion ops pipeline)
+// ============================================
+
+model Order {
+  orderKey           String      @id @default(cuid()) @map("order_key")
+  orderDate          DateTime    @default(now()) @map("order_date")
+  country            String?
+  
+  // Customer
+  customerId         String      @map("customer_id")
+  customer           Customer    @relation(fields: [customerId], references: [id])
+  
+  // Staff assignments
+  salesStaffId       String?     @map("sales_staff_id")
+  salesStaff         Staff?      @relation("SalesStaff", fields: [salesStaffId], references: [id])
+  deliveryStaffId    String?     @map("delivery_staff_id")
+  deliveryStaff      Staff?      @relation("DeliveryStaff", fields: [deliveryStaffId], references: [id])
+  
+  // Source lead link
+  sourceLeadId       String?     @map("source_lead_id")
+  sourceLead         Lead?       @relation(fields: [sourceLeadId], references: [id])
+  
+  // EM Number (unique identifier)
+  emNumber           String?     @unique @map("em_number")
+  
+  // Tracking
+  trackingNumber     String?     @map("tracking_number")
+  
+  // Status
+  orderStatus        OrderStatus @default(ONGOING) @map("order_status")
+  cancellationReason String?     @map("cancellation_reason")
+  rto                Boolean     @default(false)
+  
+  // Payment & Value
+  paymentMethod      String?     @map("payment_method")
+  value              Decimal?    @db.Decimal(10, 2)
+  
+  notes              String?     @db.Text
+  
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  orderItems         OrderItem[]
+  complaints         Complaint[]
+  feedback           CustomerFeedback[]
+  deliveryFollowups  DeliveryFollowup[]
+
+  @@index([orderStatus])
+  @@index([customerId])
+  @@index([salesStaffId])
+  @@index([deliveryStaffId])
+  @@index([emNumber])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+// ============================================
+// ORDER ITEMS (1:N)
+// ============================================
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderKey    String   @map("order_key")
+  order       Order    @relation(fields: [orderKey], references: [orderKey], onDelete: Cascade)
+  productCode String   @map("product_code")
+  product     Product  @relation(fields: [productCode], references: [productCode])
+  quantity    Int      @default(1)
+  lineValue   Decimal? @map("line_value") @db.Decimal(10, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("order_items")
+}
+
+// ============================================
+// COMPLAINTS
+// ============================================
+
+model Complaint {
+  id         String   @id @default(cuid())
+  orderKey   String   @map("order_key")
+  order      Order    @relation(fields: [orderKey], references: [orderKey])
+  complaint  String   @db.Text
+  department String?
+  csStaffId  String?  @map("cs_staff_id")
+  csStaff    Staff?   @relation(fields: [csStaffId], references: [id])
+  notes1     String?  @db.Text @map("notes_1")
+  notes2     String?  @db.Text @map("notes_2")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([orderKey])
+  @@map("complaints")
+}
+
+// ============================================
+// CUSTOMER FEEDBACK
+// ============================================
+
+model CustomerFeedback {
+  id                 String   @id @default(cuid())
+  orderKey           String   @map("order_key")
+  order              Order    @relation(fields: [orderKey], references: [orderKey])
+  feedback           String?  @db.Text
+  googleReviewLink   String?  @map("google_review_link")
+  recommendedProduct String?  @map("recommended_product")
+  notes              String?  @db.Text
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@index([orderKey])
+  @@map("customer_feedback")
+}
+
+// ============================================
+// DELIVERY FOLLOWUPS
+// ============================================
+
+model DeliveryFollowup {
+  id                     String    @id @default(cuid())
+  orderKey               String    @map("order_key")
+  order                  Order     @relation(fields: [orderKey], references: [orderKey])
+  
+  deliveryStaffId        String?   @map("delivery_staff_id")
+  deliveryStaff          Staff?    @relation("FollowupDeliveryStaff", fields: [deliveryStaffId], references: [id])
+  
+  salesStaffId           String?   @map("sales_staff_id")
+  salesStaff             Staff?    @relation("FollowupSalesStaff", fields: [salesStaffId], references: [id])
+  
+  salesInstructions      String?   @db.Text @map("sales_instructions")
+  csUpdate               String?   @db.Text @map("cs_update")
+  deliveredCancelledDate DateTime? @map("delivered_cancelled_date")
+  
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  @@index([orderKey])
+  @@map("delivery_followups")
+}
+
+// ============================================
+// SETTINGS - EM SERIES (Admin only)
+// ============================================
+
+model SettingsEmSeries {
+  id          String   @id @default(cuid())
+  country     String   @unique
+  prefix      String
+  nextCounter Int      @default(1) @map("next_counter")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("settings_em_series")
+}
+
+// ============================================
+// WHATSAPP CONVERSATIONS
+// ============================================
+
+model WhatsappConversation {
+  id              String   @id @default(cuid())
+  phoneKey        String   @unique @map("phone_key") // E.164 normalized
+  
+  customerId      String?  @map("customer_id")
+  customer        Customer? @relation(fields: [customerId], references: [id])
+  
+  activeLeadId    String?  @map("active_lead_id")
+  activeLead      Lead?    @relation(fields: [activeLeadId], references: [id])
+  
+  assignedAgentId String?  @map("assigned_agent_id")
+  assignedAgent   Staff?   @relation(fields: [assignedAgentId], references: [id])
+  
+  lastMessageAt   DateTime? @map("last_message_at")
+  unreadCount     Int      @default(0) @map("unread_count")
+  
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  messages        WhatsappMessage[]
+
+  @@index([phoneKey])
+  @@index([assignedAgentId])
+  @@index([lastMessageAt])
+  @@map("whatsapp_conversations")
+}
+
+// ============================================
+// WHATSAPP MESSAGES
+// ============================================
+
+model WhatsappMessage {
+  id             String           @id @default(cuid())
+  conversationId String           @map("conversation_id")
+  conversation   WhatsappConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  waMessageId    String           @unique @map("wa_message_id") // For idempotency
+  direction      MessageDirection
+  text           String?          @db.Text
+  mediaUrl       String?          @map("media_url")
+  timestamp      DateTime
+  rawPayload     Json?            @map("raw_payload")
+  
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  @@index([conversationId])
+  @@index([timestamp])
+  @@map("whatsapp_messages")
+}
+
+// ============================================
+// CALLS (3CX Tracking)
+// ============================================
+
+model Call {
+  id          String     @id @default(cuid())
+  leadId      String?    @map("lead_id")
+  lead        Lead?      @relation(fields: [leadId], references: [id])
+  agentId     String     @map("agent_id")
+  agent       Staff      @relation(fields: [agentId], references: [id])
+  phoneKey    String     @map("phone_key")
+  status      CallStatus @default(INITIATED)
+  startedAt   DateTime   @default(now()) @map("started_at")
+  endedAt     DateTime?  @map("ended_at")
+  cxCallId    String?    @map("cx_call_id") // 3CX call ID
+  
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  @@index([leadId])
+  @@index([agentId])
+  @@map("calls")
+}
+
+// ============================================
+// AUDIT LOG
+// ============================================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  action      String   // CREATE, UPDATE, DELETE
+  actorUserId String?  @map("actor_user_id")
+  actor       Staff?   @relation(fields: [actorUserId], references: [id])
+  before      Json?
+  after       Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@index([actorUserId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
